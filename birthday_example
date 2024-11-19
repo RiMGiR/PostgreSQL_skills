@@ -1,0 +1,80 @@
+/*This SQL query performs a multi-step operation to identify and filter clients based on specific criteria, 
+such as their activity, communication history, birthdays, and revenue. Here's a breakdown of the*/
+
+WITH attributed_clients AS (SELECT client_id
+                            FROM cache_client_feature_XILXUP9WC
+                            WHERE ('XILXUP9WC' = '' or attributed_project_id = 'KMNX9QNSU')
+                            ORDER BY client_id),
+     attributed_filtered_clients AS (SELECT client_id, attributed_project_id
+                                     FROM cache_client_feature_XILXUP9WC
+                                     WHERE (('XILXUP9WC' = '' OR attributed_project_id = 'KMNX9QNSU'))
+                                       AND (last_visited IS NULL OR current_date - last_visited between 0 and 8000)
+                                       AND ('false' = 'false'
+                                         OR last_recorded IS NULL)),
+     comms AS (SELECT cl.client_id, max(comm.communicated_at) last_comm
+               FROM attributed_clients AS cl
+                        LEFT JOIN cache_comm_feature_XILXUP9WC* AS comm
+                                  ON cl.client_id = comm.client_id
+               GROUP BY cl.client_id),
+     clients_birthdays AS (SELECT client_id,
+/*год, месяц, день рождения*/
+                                  substring((rr.data ->> 'birth_date'), 1, 4) :: integer AS date_year,
+                                  substring((rr.data ->> 'birth_date'), 6, 2) :: integer AS date_month,
+                                  substring((rr.data ->> 'birth_date'), 9, 2) :: integer AS date_day,
+/*день рождения*/
+                                  CASE
+                                      WHEN /*корректировка блока, чтобы урегулировать вариант появления клиентов, если у них день рождения через месяц уже в новом году, но сейчас прежней год*/
+                                                  DATE_PART('month', (make_date(to_char(current_date, 'YYYY')::integer,
+                                                                                substring((rr.data ->> 'birth_date'), 6, 2)::integer,
+                                                                                1) +
+                                                                      substring((rr.data ->> 'birth_date'), 9, 2)::integer -
+                                                                      1)) = 1
+/*если месяц равен 1, а текущий месяц равен 12, тогда нужно год увеличить на 1*/
+                                              AND DATE_PART('month', current_date) = 12
+                                          THEN
+                                          (make_date(to_char(current_date, 'YYYY')::integer + 1,
+                                                     substring((rr.data ->> 'birth_date'), 6, 2)::integer, 1) +
+                                           substring((rr.data ->> 'birth_date'), 9, 2)::integer - 1)
+                                      ELSE
+                                          (make_date(to_char(current_date, 'YYYY')::integer,
+                                                     substring((rr.data ->> 'birth_date'), 6, 2)::integer, 1) +
+                                           substring((rr.data ->> 'birth_date'), 9, 2)::integer - 1)
+                                      END                                                   birthday
+                           FROM attributed_filtered_clients cl
+                                    LEFT JOIN connector con ON cl.attributed_project_id = con.project_id
+                                    LEFT JOIN raw_record_KMNX9QNSU_altegio_7zy rr
+                                              ON con.connector_id = rr.connector_id
+                                                  AND rr.raw_entity = 'clients'
+                                                  AND cl.client_id = raw_id
+                           WHERE substring((rr.data ->> 'birth_date'), 5, 1) = '-'),
+     sum_revenue AS (SELECT client_id, SUM(revenue) AS revenue
+                     FROM (SELECT client_id, attendance_revenue AS revenue
+                           FROM cache_att_feature_base_XILXUP9WC
+                           WHERE attendance_status = '1'
+                           UNION ALL
+                           SELECT client_id, revenue AS revenue
+                           FROM cache_product_feature_base_XILXUP9WC
+                           WHERE product_status = '1') AS all_purchase
+                     GROUP BY client_id
+                     HAVING SUM(revenue) between 150000 AND 400000);
+
+select distinct cl.client_id
+              , 'KMNX9QNSU'
+              , jsonb_build_object('year', date_part('year', cl.birthday))                   qualifying_features
+              , jsonb_build_object('client_birthday',
+                                   jsonb_build_object('year', cl.date_year::int, 'month', cl.date_month::int, 'day',
+                                                      cl.date_day::int),
+                                   'params', jsonb_build_object('consider_activation_priority', 'f'::boolean,
+                                                                'force_comm', 't'::boolean)) filter_data
+from clients_birthdays cl
+         left join comms on cl.client_id = comms.client_id
+         left join sum_revenue on cl.client_id = sum_revenue.client_id
+where ('1970-01-01' != '1970-01-01' OR cl.birthday - current_date between 0 and 130)
+  and ('1970-01-01' = '1970-01-01' or cl.birthday between '1970-01-01'::date and (current_date + 130))
+  and ('false' != 'true' or
+       (((EXTRACT('year' from AGE(current_date, make_date(cl.date_year, cl.date_month, cl.date_day)))::integer * 12)
+           + (EXTRACT('month' from AGE(current_date,
+                                       make_date(cl.date_year, cl.date_month, cl.date_day)))::integer)) between 0 AND 150))
+  and (last_comm is null or current_date - last_comm >= 0)
+  and ('f'::boolean = false or sum_revenue.revenue between 0 AND 150000)
+;
